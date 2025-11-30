@@ -1,0 +1,18 @@
+# Python venv
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS / IDE 垃圾
+.DS_Store
+.vscode/
+.idea/
+
+# 其他可选
+*.log

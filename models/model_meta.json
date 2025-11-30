@@ -1,0 +1,1 @@
+{"num_cols": ["amt_sum_12m", "amt_mean", "amt_max", "n_claims", "Premium", "Deductible", "pet_age_months", "days_since_policy_start", "loss_ratio_12m"], "cat_cols": ["Species", "Breed", "EnrollPath"], "model_version": "v0.2-external-data"}

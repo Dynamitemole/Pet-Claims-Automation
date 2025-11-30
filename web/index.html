@@ -1,0 +1,239 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Pet Claims - Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1220; --card:#0f172a; --muted:#94a3b8; --text:#e2e8f0; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+    body { margin:0; background:linear-gradient(180deg,#0b1220,#0b1220 60%,#111827); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { max-width:980px; margin:40px auto; padding:0 16px; }
+    .card { background:var(--card); border:1px solid #1f2937; border-radius:16px; padding:18px 20px; box-shadow:0 6px 30px rgba(0,0,0,.35); }
+    h1 { margin:0 0 10px; font-size:22px; display:flex; align-items:center; gap:8px; }
+    .sub { color:var(--muted); font-size:13px; }
+    .row { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:12px; margin-top:12px; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+    input, select { width:100%; padding:10px 12px; background:#0b1220; color:var(--text); border:1px solid #263046; border-radius:10px; outline:none; }
+    input:focus, select:focus { border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.2); }
+    .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+    button { background:#1f2937; color:var(--text); border:1px solid #374151; padding:10px 14px; border-radius:10px; cursor:pointer; }
+    button.primary { background:#2563eb; border-color:#2563eb; }
+    button.ghost { background:transparent; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #374151; }
+    .ok { color:#22c55e; border-color:#14532d; }
+    .warn { color:#f59e0b; border-color:#78350f; }
+    .ver { margin-left:8px; }
+
+    .result { margin-top:16px; display:grid; grid-template-columns: 1.1fr 0.9fr; gap:14px; }
+    @media (max-width:880px){ .row{grid-template-columns:1fr 1fr}; .result{grid-template-columns:1fr} }
+
+    .badge { display:inline-flex; align-items:center; gap:6px; font-weight:600; font-size:13px; padding:6px 10px; border-radius:999px; border:1px solid; }
+    .badge.approve { color:#16a34a; border-color:#14532d; background:rgba(22,163,74,.12); }
+    .badge.review  { color:#f59e0b; border-color:#78350f; background:rgba(245,158,11,.12); }
+    .badge.reject  { color:#ef4444; border-color:#7f1d1d; background:rgba(239,68,68,.12); }
+
+    .score { margin-top:8px; }
+    .bar { height:10px; background:#0c1426; border:1px solid #1f2937; border-radius:12px; overflow:hidden; }
+    .bar > div { height:100%; width:0%; transition:width .4s ease; background:linear-gradient(90deg,#22c55e,#f59e0b 50%,#ef4444); }
+
+    .block { background:#0c1426; border:1px solid #1f2937; border-radius:12px; padding:12px; }
+    .block h3 { margin:0 0 6px; font-size:14px; color:#cbd5e1; }
+    .reason { font-size:13px; line-height:1.5; color:#dbe3ee; }
+    .features { margin:6px 0 0; padding-left:18px; font-size:13px; color:#cbd5e1; }
+    .features li { margin:4px 0; }
+    .up::before { content:"▲ "; }
+    .down::before { content:"▼ "; }
+
+    .logs { margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    @media (max-width:880px){ .logs{grid-template-columns:1fr} }
+    .log { white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0c1426; border:1px solid #1f2937; border-radius:12px; padding:12px; max-height:280px; overflow:auto; }
+    .footer { margin-top:10px; font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>
+        Pet Claims MVP
+        <span class="pill ver" id="ver-pill">v:unknown</span>
+        <span class="pill warn" id="status">status: idle</span>
+      </h1>
+      <div class="sub">One-page demo: quick training, online prediction, and human-readable explanations. Calls your /admin/*, /predict, /score, /explain endpoints.</div>
+
+      <div class="btns">
+        <button id="btn-quick" class="primary">🚀 Quick Train (prep → train)</button>
+        <button id="btn-prep">📦 Prepare Data (/admin/prep)</button>
+        <button id="btn-train">🧠 Train Only (/admin/train)</button>
+        <button id="btn-check" class="ghost">🔎 Check Version</button>
+      </div>
+
+      <div class="row">
+        <div><label>Species</label>
+          <select id="Species">
+            <option>Dog</option><option>Cat</option>
+          </select>
+        </div>
+        <div><label>Breed</label><input id="Breed" placeholder="Labrador"></div>
+        <div><label>Sex</label>
+          <select id="Sex"><option>M</option><option>F</option></select>
+        </div>
+        <div><label>Country</label><input id="Country" placeholder="UK"></div>
+
+        <div><label>Pet age (months)</label><input id="pet_age_months" type="number" step="1" placeholder="24" title="Pet age at enrollment or current, in months"></div>
+        <div><label>Enroll path (channel)</label>
+          <select id="EnrollPath" title="Acquisition channel">
+            <option value="">--</option>
+            <option>Online</option>
+            <option>Agent</option>
+            <option>Phone</option>
+            <option>Vet</option>
+          </select>
+        </div>
+        <div><label>Premium (optional)</label><input id="Premium" type="number" step="0.01" placeholder="" title="Monthly premium"></div>
+        <div><label>Deductible (optional)</label><input id="Deductible" type="number" step="0.01" placeholder="" title="Per-claim deductible"></div>
+
+        <div><label>amt_sum_12m</label><input id="amt_sum_12m" type="number" step="0.01" placeholder="200" title="Total paid amount over the last 12 months"></div>
+        <div><label>amt_mean</label><input id="amt_mean" type="number" step="0.01" placeholder="100" title="Average claim size historically"></div>
+        <div><label>amt_max</label><input id="amt_max" type="number" step="0.01" placeholder="150" title="Max single claim historically"></div>
+        <div><label>n_claims</label><input id="n_claims" type="number" step="1" placeholder="1" title="Number of claims in the last 12 months"></div>
+      </div>
+
+      <div class="btns">
+        <button id="btn-predict" class="primary">🔮 Predict (/predict)</button>
+        <button id="btn-explain">🧩 Explain (/explain)</button>
+        <button id="btn-score" class="ghost">📈 Probability (/score)</button>
+      </div>
+
+      <div class="result">
+        <div class="block">
+          <h3>Recommendation & Risk</h3>
+          <div id="label-badge" class="badge review">label: review</div>
+          <div class="score">
+            <div style="display:flex;justify-content:space-between;margin:4px 2px 6px;">
+              <span class="sub">Risk probability</span>
+              <span id="score-text" class="sub">0.0%</span>
+            </div>
+            <div class="bar"><div id="score-bar"></div></div>
+          </div>
+        </div>
+
+        <div class="block">
+          <h3>Reasons (English)</h3>
+          <div id="reasons" class="reason">—</div>
+          <ul id="features" class="features"></ul>
+        </div>
+      </div>
+
+      <div class="logs">
+        <div>
+          <div class="sub">Request</div>
+          <div class="log" id="req"></div>
+        </div>
+        <div>
+          <div class="sub">Response</div>
+          <div class="log" id="resp"></div>
+        </div>
+      </div>
+
+      <div class="footer">Empty fields are imputed by the pipeline. Training artifacts live in models/model.pkl + model_meta.json.</div>
+    </div>
+  </div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const log = (el, obj) => el.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+const statusPill = $('#status');
+const verPill = $('#ver-pill');
+
+function payload(){
+  const keys = [
+    "Species","Breed","Sex","Country",
+    "pet_age_months","EnrollPath",
+    "Premium","Deductible",
+    "amt_sum_12m","amt_mean","amt_max","n_claims"
+  ];
+  const p = {};
+  for (const k of keys){
+    const v = $('#' + k)?.value ?? "";
+    if (v !== "") {
+      if (["amt_sum_12m","amt_mean","amt_max","n_claims","Premium","Deductible","pet_age_months"].includes(k)){
+        p[k] = isNaN(Number(v)) ? v : Number(v);
+      } else {
+        p[k] = v;
+      }
+    }
+  }
+  return p;
+}
+
+async function call(path, body){
+  $('#req').textContent = JSON.stringify(body || {}, null, 2);
+  statusPill.textContent = "status: " + path;
+  statusPill.className = "pill warn";
+  const r = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(body || {})
+  });
+  let data = {};
+  try { data = await r.json(); } catch { data = { error: "invalid json" }; }
+  log($('#resp'), data);
+  statusPill.textContent = "status: OK";
+  statusPill.className = "pill ok";
+  return data;
+}
+
+function renderBadge(label){
+  const el = $('#label-badge');
+  el.textContent = "label: " + label;
+  el.className = "badge " + (label || "review");
+}
+function renderScore(score){
+  const pct = Math.max(0, Math.min(100, (Number(score)||0)*100));
+  $('#score-text').textContent = pct.toFixed(1) + "%";
+  $('#score-bar').style.width = pct + "%";
+}
+function renderReasons(text){
+  $('#reasons').textContent = text || "The model combines multiple historical signals to produce the recommendation.";
+}
+function renderTopFeatures(top){
+  const ul = $('#features');
+  ul.innerHTML = "";
+  if (!Array.isArray(top)) return;
+  const items = top.slice(0,3);
+  for (const [name, val] of items){
+    const li = document.createElement('li');
+    li.className = (val >= 0) ? "up" : "down";
+    li.textContent = `${name} (${val.toFixed(3)})`;
+    ul.appendChild(li);
+  }
+}
+async function refreshVersion(){
+  try{
+    const r = await fetch('/meta');
+    const d = await r.json();
+    if (d && d.model_version) verPill.textContent = "v:" + d.model_version;
+  }catch{}
+}
+
+$('#btn-prep').onclick = async () => { await call('/admin/prep', {}); };
+$('#btn-train').onclick = async () => { await call('/admin/train', {}); await refreshVersion(); };
+$('#btn-quick').onclick = async () => { await call('/admin/prep', {}); await call('/admin/train', {}); await refreshVersion(); };
+
+$('#btn-predict').onclick = async () => {
+  const d = await call('/predict', payload());
+  if (d){
+    renderBadge(d.label);
+    renderScore(d.score);
+    renderReasons(d.rationale);
+    renderTopFeatures(d.top_features);
+  }
+};
+$('#btn-explain').onclick = async () => { await call('/explain', payload()); };
+$('#btn-score').onclick = async () => { await call('/score', payload()); };
+$('#btn-check').onclick = async () => { await refreshVersion(); };
+
+refreshVersion();
+</script>
+</body>
+</html>
