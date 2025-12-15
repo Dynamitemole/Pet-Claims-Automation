@@ -7,9 +7,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
 import joblib
 
 def load_features(data_dir="data"):
@@ -56,20 +54,34 @@ def train(data_dir="data", out_dir="models"):
     df = load_features(data_dir)
 
     # 所有可能的候选列（按可用性筛）
+    # 这里有两个不同的目标：
+    # - 训练标签(Decision)可以来自历史理赔(弱标签)
+    # - 但线上推理时，往往只拿得到“投保/宠物静态信息”(quote-time features)
+    # 为了让 /predict 能根据输入的宠物数据产生差异化结果，
+    # 我们把模型特征限制为 quote-time 可用列。
     ALL_NUM = [
-    "amt_sum_12m","amt_mean","amt_max","n_claims",
-    "Premium","Deductible",
-    "pet_age_months","days_since_policy_start","loss_ratio_12m"
+        "Premium",
+        "Deductible",
+        "pet_age_months",
     ]
-    ALL_CAT = ["Species","Breed","EnrollPath"]  # Sex/Country 不在原始CSV中，这里先不上
+    ALL_CAT = [
+        "Species",
+        "Breed",
+        "EnrollPath",
+        "Sex",
+        "Country",
+    ]
 
 
     num_cols = [c for c in ALL_NUM if c in df.columns]
+    # Some derived columns can end up entirely missing depending on data quality.
+    # Drop all-missing numeric columns to avoid imputer warnings and keep the pipeline stable.
+    num_cols = [c for c in num_cols if df[c].notna().any()]
     cat_cols = [c for c in ALL_CAT if c in df.columns]
 
-    # 至少要有一些核心数值列
-    if not any(c in num_cols for c in ["amt_sum_12m","n_claims","amt_mean","amt_max"]):
-        raise ValueError(f"Core numeric features missing. Columns in data: {df.columns.tolist()}")
+    # 至少要有一些可用特征，否则训练没有意义
+    if len(num_cols) + len(cat_cols) == 0:
+        raise ValueError(f"No usable features found for training. Columns in data: {df.columns.tolist()}")
 
     X = df[num_cols + cat_cols].copy()
     y = df["Decision"]
@@ -83,15 +95,13 @@ def train(data_dir="data", out_dir="models"):
         ("cat", cat_pipe, cat_cols),
     ])
 
-    base = HistGradientBoostingClassifier(
-        learning_rate=0.08,
-        max_depth=3,
-        min_samples_leaf=50,
-        l2_regularization=0.2,
-        early_stopping=True,
+    clf = LogisticRegression(
+        max_iter=2000,
+        solver="saga",
+        n_jobs=-1,
+        class_weight="balanced",
         random_state=42,
     )
-    clf = CalibratedClassifierCV(estimator=base, method="sigmoid", cv=5)
 
     pipe = Pipeline([("pre", pre), ("clf", clf)])
 
@@ -100,9 +110,76 @@ def train(data_dir="data", out_dir="models"):
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(pipe, Path(out_dir, "model.pkl"))
-    meta = {"num_cols": num_cols, "cat_cols": cat_cols, "model_version": "v0.2-external-data"}
+    meta = {"num_cols": num_cols, "cat_cols": cat_cols, "model_version": "v0.3-quote-features-lr"}
     Path(out_dir, "model_meta.json").write_text(json.dumps(meta))
 
     print("Train acc:", pipe.score(Xtr, ytr), " Test acc:", pipe.score(Xte, yte))
     print("Using num_cols:", num_cols, " cat_cols:", cat_cols)
+    return pipe
+
+
+def train_claims(data_dir="data", out_dir="models"):
+    df = load_features(data_dir)
+
+    ALL_NUM = [
+        "amt_sum_12m",
+        "amt_mean",
+        "amt_max",
+        "n_claims",
+        "loss_ratio_12m",
+        "days_since_policy_start",
+        "preexisting_proxy",
+        "Premium",
+        "Deductible",
+        "pet_age_months",
+    ]
+    ALL_CAT = [
+        "Species",
+        "Breed",
+        "EnrollPath",
+        "Sex",
+        "Country",
+    ]
+
+    num_cols = [c for c in ALL_NUM if c in df.columns]
+    # Some derived columns can end up entirely missing depending on data quality.
+    # Drop all-missing numeric columns to avoid imputer warnings and keep the pipeline stable.
+    num_cols = [c for c in num_cols if df[c].notna().any()]
+    cat_cols = [c for c in ALL_CAT if c in df.columns]
+
+    if not any(c in num_cols for c in ["amt_sum_12m", "amt_mean", "amt_max", "n_claims"]):
+        raise ValueError(f"Core claim-history features missing. Columns in data: {df.columns.tolist()}")
+
+    X = df[num_cols + cat_cols].copy()
+    y = df["Decision"]
+
+    num_pipe = Pipeline([("imputer", SimpleImputer(strategy="median"))])
+    cat_pipe = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
+                         ("ohe", OneHotEncoder(handle_unknown="ignore"))])
+
+    pre = ColumnTransformer([
+        ("num", num_pipe, num_cols),
+        ("cat", cat_pipe, cat_cols),
+    ])
+
+    clf = LogisticRegression(
+        max_iter=3000,
+        solver="saga",
+        n_jobs=-1,
+        class_weight="balanced",
+        random_state=42,
+    )
+
+    pipe = Pipeline([("pre", pre), ("clf", clf)])
+
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    pipe.fit(Xtr, ytr)
+
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipe, Path(out_dir, "model_claims.pkl"))
+    meta = {"num_cols": num_cols, "cat_cols": cat_cols, "model_version": "v0.1-claims-risk-lr"}
+    Path(out_dir, "model_claims_meta.json").write_text(json.dumps(meta))
+
+    print("Claims model Train acc:", pipe.score(Xtr, ytr), " Test acc:", pipe.score(Xte, yte))
+    print("Claims model Using num_cols:", num_cols, " cat_cols:", cat_cols)
     return pipe

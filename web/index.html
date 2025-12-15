@@ -64,16 +64,24 @@
         <button id="btn-quick" class="primary">🚀 Quick Train (prep → train)</button>
         <button id="btn-prep">📦 Prepare Data (/admin/prep)</button>
         <button id="btn-train">🧠 Train Only (/admin/train)</button>
+        <button id="btn-train-claims">🧾 Train Claims Model (/admin/train_claims)</button>
+        <button id="btn-quick-both" class="ghost">⚡ Quick Train Both</button>
         <button id="btn-check" class="ghost">🔎 Check Version</button>
       </div>
 
       <div class="row">
-        <div><label>Species</label>
-          <select id="Species">
-            <option>Dog</option><option>Cat</option>
+        <div><label>Customer type</label>
+          <select id="CustomerType" title="Choose which model to use">
+            <option value="underwriting">New customer (no claim history)</option>
+            <option value="claims">Existing customer (with claim history)</option>
           </select>
         </div>
-        <div><label>Breed</label><input id="Breed" placeholder="Labrador"></div>
+        <div><label>Species</label>
+          <select id="Species"></select>
+        </div>
+        <div><label>Breed</label>
+          <select id="Breed"></select>
+        </div>
         <div><label>Sex</label>
           <select id="Sex"><option>M</option><option>F</option></select>
         </div>
@@ -92,10 +100,12 @@
         <div><label>Premium (optional)</label><input id="Premium" type="number" step="0.01" placeholder="" title="Monthly premium"></div>
         <div><label>Deductible (optional)</label><input id="Deductible" type="number" step="0.01" placeholder="" title="Per-claim deductible"></div>
 
-        <div><label>amt_sum_12m</label><input id="amt_sum_12m" type="number" step="0.01" placeholder="200" title="Total paid amount over the last 12 months"></div>
-        <div><label>amt_mean</label><input id="amt_mean" type="number" step="0.01" placeholder="100" title="Average claim size historically"></div>
-        <div><label>amt_max</label><input id="amt_max" type="number" step="0.01" placeholder="150" title="Max single claim historically"></div>
-        <div><label>n_claims</label><input id="n_claims" type="number" step="1" placeholder="1" title="Number of claims in the last 12 months"></div>
+        <div id="claims-fields" style="display:none;">
+          <div><label>amt_sum_12m</label><input id="amt_sum_12m" type="number" step="0.01" placeholder="200" title="Total paid amount over the last 12 months"></div>
+          <div><label>amt_mean</label><input id="amt_mean" type="number" step="0.01" placeholder="100" title="Average claim size historically"></div>
+          <div><label>amt_max</label><input id="amt_max" type="number" step="0.01" placeholder="150" title="Max single claim historically"></div>
+          <div><label>n_claims</label><input id="n_claims" type="number" step="1" placeholder="1" title="Number of claims in the last 12 months"></div>
+        </div>
       </div>
 
       <div class="btns">
@@ -145,6 +155,52 @@ const log = (el, obj) => el.textContent = typeof obj === 'string' ? obj : JSON.s
 const statusPill = $('#status');
 const verPill = $('#ver-pill');
 
+let OPTIONS = null;
+
+function fillSelect(sel, items, includeBlank){
+  const el = $(sel);
+  if (!el) return;
+  el.innerHTML = '';
+  if (includeBlank){
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '--';
+    el.appendChild(opt);
+  }
+  for (const x of (items || [])){
+    const opt = document.createElement('option');
+    opt.value = x;
+    opt.textContent = x;
+    el.appendChild(opt);
+  }
+}
+
+function refreshBreeds(){
+  const sp = $('#Species')?.value || '';
+  const breeds = (OPTIONS && OPTIONS.breeds_by_species && OPTIONS.breeds_by_species[sp]) ? OPTIONS.breeds_by_species[sp] : [];
+  fillSelect('#Breed', breeds, true);
+}
+
+async function loadOptions(){
+  try{
+    const r = await fetch('/options');
+    const d = await r.json();
+    OPTIONS = d;
+    fillSelect('#Species', (d && d.species) ? d.species : ['Dog','Cat'], false);
+    fillSelect('#EnrollPath', (d && d.enroll_paths) ? d.enroll_paths : ['Online','Agent','Phone','Vet'], true);
+    refreshBreeds();
+    const ageCap = (d && typeof d.age_cap_months === 'number') ? d.age_cap_months : null;
+    if (ageCap){
+      const ageEl = $('#pet_age_months');
+      if (ageEl) ageEl.max = String(ageCap);
+    }
+  }catch{
+    fillSelect('#Species', ['Dog','Cat'], false);
+    fillSelect('#EnrollPath', ['Online','Agent','Phone','Vet'], true);
+    fillSelect('#Breed', [], true);
+  }
+}
+
 function payload(){
   const keys = [
     "Species","Breed","Sex","Country",
@@ -166,11 +222,21 @@ function payload(){
   return p;
 }
 
+function currentModelKey(){
+  return $('#CustomerType')?.value || 'underwriting';
+}
+
 async function call(path, body){
   $('#req').textContent = JSON.stringify(body || {}, null, 2);
   statusPill.textContent = "status: " + path;
   statusPill.className = "pill warn";
-  const r = await fetch(path, {
+
+  let url = path;
+  if (['/predict','/score','/explain'].includes(path)){
+    url = path + '?model_key=' + encodeURIComponent(currentModelKey());
+  }
+
+  const r = await fetch(url, {
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify(body || {})
@@ -210,15 +276,24 @@ function renderTopFeatures(top){
 }
 async function refreshVersion(){
   try{
-    const r = await fetch('/meta');
+    const r = await fetch('/meta?model_key=' + encodeURIComponent(currentModelKey()));
     const d = await r.json();
     if (d && d.model_version) verPill.textContent = "v:" + d.model_version;
   }catch{}
 }
 
+function refreshCustomerUI(){
+  const mk = currentModelKey();
+  const el = $('#claims-fields');
+  if (el) el.style.display = (mk === 'claims') ? '' : 'none';
+  refreshVersion();
+}
+
 $('#btn-prep').onclick = async () => { await call('/admin/prep', {}); };
 $('#btn-train').onclick = async () => { await call('/admin/train', {}); await refreshVersion(); };
 $('#btn-quick').onclick = async () => { await call('/admin/prep', {}); await call('/admin/train', {}); await refreshVersion(); };
+$('#btn-train-claims').onclick = async () => { await call('/admin/train_claims', {}); await refreshVersion(); };
+$('#btn-quick-both').onclick = async () => { await call('/admin/prep', {}); await call('/admin/train', {}); await call('/admin/train_claims', {}); await refreshVersion(); };
 
 $('#btn-predict').onclick = async () => {
   const d = await call('/predict', payload());
@@ -233,7 +308,12 @@ $('#btn-explain').onclick = async () => { await call('/explain', payload()); };
 $('#btn-score').onclick = async () => { await call('/score', payload()); };
 $('#btn-check').onclick = async () => { await refreshVersion(); };
 
+$('#Species').onchange = () => { refreshBreeds(); };
+$('#CustomerType').onchange = () => { refreshCustomerUI(); };
+
 refreshVersion();
+loadOptions();
+refreshCustomerUI();
 </script>
 </body>
 </html>

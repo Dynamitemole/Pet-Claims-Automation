@@ -7,9 +7,26 @@ import numpy as np
 
 MODELS_DIR = Path("models")
 
-def load_model():
-    pipe = joblib.load(MODELS_DIR / "model.pkl")
-    meta = json.loads((MODELS_DIR / "model_meta.json").read_text())
+_MODEL_REGISTRY = {
+    "underwriting": {"model": "model.pkl", "meta": "model_meta.json"},
+    "claims": {"model": "model_claims.pkl", "meta": "model_claims_meta.json"},
+}
+
+def load_model(model_key: str = "underwriting"):
+    spec = _MODEL_REGISTRY.get(model_key)
+    if spec is None:
+        raise FileNotFoundError(f"Unknown model_key '{model_key}'. Available: {sorted(_MODEL_REGISTRY.keys())}")
+
+    model_path = MODELS_DIR / spec["model"]
+    meta_path = MODELS_DIR / spec["meta"]
+    if not model_path.exists() or not meta_path.exists():
+        raise FileNotFoundError(
+            f"Missing artifacts for model_key='{model_key}'. Expected: {model_path} and {meta_path}"
+        )
+
+    pipe = joblib.load(model_path)
+    meta = json.loads(meta_path.read_text())
+    meta["model_key"] = model_key
     return pipe, meta
 
 def _unwrap_to_base_estimator(clf):
@@ -53,6 +70,18 @@ def explain(pipe, X_row):
 
     # 2) 尝试对“底层树模型”做 TreeExplainer
     base_model = _unwrap_to_base_estimator(clf)
+
+    # ---- 线性模型优先：直接用系数计算单样本贡献（稳定且无需 SHAP） ----
+    # LogisticRegression: coef_ shape=(1, n_features) for binary
+    if hasattr(base_model, "coef_"):
+        coef = np.asarray(getattr(base_model, "coef_"), dtype=np.float64)
+        if coef.ndim == 2 and coef.shape[0] >= 1 and Z.shape[0] >= 1:
+            # coef 对应的是 class=1（通常是“approve/安全”）相对于 class=0 的 log-odds 贡献
+            # 我们要反过来解释成“对风险”的贡献
+            contrib = -(coef[0] * Z[0])
+            names = pre.get_feature_names_out()
+            top_idx = np.argsort(np.abs(contrib))[::-1][:5]
+            return [(names[i], float(contrib[i])) for i in top_idx]
 
     try:
         explainer = shap.TreeExplainer(base_model)

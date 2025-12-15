@@ -13,6 +13,7 @@ from uuid import uuid4
 from fastapi import APIRouter
 from app.services.feature_engineering import make_datasets
 from app.services.model_train import train as train_model
+from app.services.model_train import train_claims as train_claims_model
 from app.schemas import ClaimInput, DecisionOutput
 from app.services.model_infer import load_model, explain
 from starlette.responses import HTMLResponse
@@ -32,6 +33,10 @@ def train():
     pipe = train_model("data", "models")
     return {"status": "ok", "model": "models/model.pkl"}
 
+@admin.post("/train_claims")
+def train_claims():
+    pipe = train_claims_model("data", "models")
+    return {"status": "ok", "model": "models/model_claims.pkl"}
 
 # ==== Schemas ====
 class Features(BaseModel):
@@ -90,9 +95,10 @@ class OverrideResponse(BaseModel):
 
 # ==== Data & files ====
 Path("data").mkdir(exist_ok=True)
-SAMPLE_CSV = Path("data/sample_claims.csv")
 DECISIONS_CSV = Path("data/decisions.csv")
 AUDIT_CSV = Path("data/audit_log.csv")
+PET_FEATURES_CSV = Path("data/processed/pet_features.csv")
+AGE_CAP_MONTHS = 240.0
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -109,49 +115,6 @@ def append_csv(file: Path, headers: list[str], row: dict) -> None:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writerow({k: row.get(k, "") for k in headers})
 
-# --- CSV 懒加载（编码兜底） ---
-def load_sample_df() -> pd.DataFrame:
-    if not SAMPLE_CSV.exists():
-        return pd.DataFrame()
-    for enc in ("utf-8", "utf-8-sig", "gbk", "cp1252", "latin1"):
-        try:
-            return pd.read_csv(SAMPLE_CSV, encoding=enc, on_bad_lines="skip")
-        except UnicodeDecodeError:
-            continue
-    return pd.read_csv(SAMPLE_CSV, encoding="latin1", on_bad_lines="skip")
-
-# 背景数据：优先 CSV 抽样；否则合成
-def _background() -> np.ndarray:
-    df = load_sample_df()
-    if not df.empty and all(col in df.columns for col in FEATURE_ORDER):
-        bg = df[FEATURE_ORDER].copy()
-        if len(bg) > 50:
-            bg = bg.sample(50, random_state=0)
-        return bg.values
-    rng_claim = np.linspace(50, 2000, 20)
-    rng_age = np.linspace(1, 180, 20)
-    grid = np.array(np.meshgrid(rng_claim, rng_age)).T.reshape(-1, 2)
-    bg = pd.DataFrame(grid, columns=FEATURE_ORDER).sample(50, random_state=0)
-    return bg.values
-
-def _features_from_claim_id(claim_id: str) -> Features:
-    df = load_sample_df()
-    if df.empty:
-        raise HTTPException(status_code=400, detail="sample_claims.csv not found or unreadable; please pass 'features' directly")
-    row = df.loc[df["claim_id"] == claim_id]
-    if row.empty:
-        raise HTTPException(status_code=404, detail=f"claim_id '{claim_id}' not found in sample_claims.csv")
-    r = row.iloc[0]
-    return Features(
-        claim_amount=float(r["claim_amount"]),
-        pet_age_months=int(r["pet_age_months"]),
-        text=str(r.get("text", ""))
-    )
-
-def _to_dataframe(feat: Features) -> pd.DataFrame:
-    data = {"claim_amount": [feat.claim_amount], "pet_age_months": [feat.pet_age_months]}
-    return pd.DataFrame(data)[FEATURE_ORDER]
-
 def _map_prob_to_label(p_risky: float) -> str:
     if p_risky < 0.30:
         return "approve"
@@ -159,6 +122,87 @@ def _map_prob_to_label(p_risky: float) -> str:
         return "reject"
     else:
         return "review"
+
+def _load_model_or_http(model_key: str = "underwriting"):
+    try:
+        return load_model(model_key=model_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail=f"Model artifacts not found for model_key='{model_key}'. Please train first.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load model artifacts: {type(e).__name__}: {e}")
+
+def _select_model_key(payload: ClaimInput, model_key: Optional[str]) -> str:
+    if model_key:
+        return model_key
+    for k in ("amt_sum_12m", "amt_mean", "amt_max", "n_claims"):
+        if getattr(payload, k, None) is not None:
+            return "claims"
+    return "underwriting"
+
+def _apply_age_handling(payload: ClaimInput, X: pd.DataFrame) -> float:
+    age_penalty = 0.0
+
+    age_raw = getattr(payload, "pet_age_months", None)
+    if age_raw is None or "pet_age_months" not in X.columns:
+        return 0.0
+    try:
+        age_val = float(age_raw)
+    except Exception:
+        return 0.0
+
+    if age_val < 1.0:
+        age_val = 1.0
+    if age_val > AGE_CAP_MONTHS:
+        # Scheme A: stronger monotonic penalty for out-of-distribution ages
+        over = max(0.0, age_val - AGE_CAP_MONTHS)
+        tau = max(1.0, AGE_CAP_MONTHS / 4.0)
+        age_penalty = min(0.80, (1.0 - float(np.exp(-over / tau))) * 0.80)
+        age_val = AGE_CAP_MONTHS
+
+    X.loc[X.index[0], "pet_age_months"] = age_val
+    return float(age_penalty)
+
+def _load_options() -> dict:
+    default = {
+        "species": ["Dog", "Cat"],
+        "breeds_by_species": {"Dog": [], "Cat": []},
+        "enroll_paths": ["Online", "Agent", "Phone", "Vet"],
+        "age_cap_months": AGE_CAP_MONTHS,
+    }
+    if not PET_FEATURES_CSV.exists():
+        return default
+    try:
+        df = pd.read_csv(PET_FEATURES_CSV)
+    except Exception:
+        return default
+
+    species = default["species"]
+    if "Species" in df.columns:
+        s = sorted([x for x in df["Species"].dropna().astype(str).unique().tolist() if x])
+        if s:
+            species = s
+
+    breeds_by_species: dict[str, list[str]] = {}
+    if "Species" in df.columns and "Breed" in df.columns:
+        tmp = df[["Species", "Breed"]].dropna()
+        tmp["Species"] = tmp["Species"].astype(str)
+        tmp["Breed"] = tmp["Breed"].astype(str)
+        for sp, g in tmp.groupby("Species"):
+            breeds = sorted([x for x in g["Breed"].unique().tolist() if x])
+            breeds_by_species[str(sp)] = breeds
+
+    enroll_paths = default["enroll_paths"]
+    if "EnrollPath" in df.columns:
+        ep = sorted([x for x in df["EnrollPath"].dropna().astype(str).unique().tolist() if x])
+        if ep:
+            enroll_paths = ep
+
+    return {
+        "species": species,
+        "breeds_by_species": breeds_by_species,
+        "enroll_paths": enroll_paths,
+        "age_cap_months": AGE_CAP_MONTHS,
+    }
 
 def _nl_explain_en(topk: list[tuple[str, float]], payload) -> str:
     """
@@ -233,9 +277,10 @@ def _nl_explain_en(topk: list[tuple[str, float]], payload) -> str:
 
 # ==== Endpoints ====
 @app.post("/predict", response_model=DecisionOutput)
-def predict(payload: ClaimInput):
+def predict(payload: ClaimInput, model_key: Optional[str] = None):
     # 1) Load latest model + meta
-    pipe, meta = load_model()
+    mk = _select_model_key(payload, model_key)
+    pipe, meta = _load_model_or_http(mk)
     cols = meta["num_cols"] + meta["cat_cols"]
 
     # 2) Build one-row dataframe
@@ -245,11 +290,16 @@ def predict(payload: ClaimInput):
             row_dict[k] = v
     X = pd.DataFrame([row_dict], columns=cols)
 
+    age_penalty = _apply_age_handling(payload, X)
+
     # 3) Predict -> 风险概率 = 1 - p(approve)
     proba = pipe.predict_proba(X)[0]
     # 按训练约定：Decision==1 表示“auto-approve 倾向”
     p_approve = float(proba[1])
     p_risky = 1.0 - p_approve
+
+    if age_penalty > 0:
+        p_risky = min(0.99, p_risky + age_penalty)
 
     # 为了 UI 好看做一点夹紧
     p_risky = max(0.01, min(0.99, p_risky))
@@ -273,8 +323,9 @@ def predict(payload: ClaimInput):
 
 
 @app.post("/score", response_model=ScoreResponse)
-def score(payload: ClaimInput):
-    pipe, meta = load_model()
+def score(payload: ClaimInput, model_key: Optional[str] = None):
+    mk = _select_model_key(payload, model_key)
+    pipe, meta = _load_model_or_http(mk)
     cols = meta["num_cols"] + meta["cat_cols"]
 
     row = {c: None for c in cols}
@@ -283,8 +334,14 @@ def score(payload: ClaimInput):
             row[k] = v
     X = pd.DataFrame([row])
 
+    age_penalty = _apply_age_handling(payload, X)
+
     p_approve = float(pipe.predict_proba(X)[0][1])  # class 1 = approve tendency (per training)
     p_risky = 1.0 - p_approve                       # we display risky prob in UI
+
+    if age_penalty > 0:
+        p_risky = min(0.99, p_risky + age_penalty)
+
     label = _map_prob_to_label(p_risky)
 
     return ScoreResponse(
@@ -294,9 +351,10 @@ def score(payload: ClaimInput):
     )
 
 @app.post("/explain", response_model=ExplainResponse)
-def explain_route(payload: ClaimInput):
+def explain_route(payload: ClaimInput, model_key: Optional[str] = None):
     # 1) 载入最新模型与元数据
-    pipe, meta = load_model()
+    mk = _select_model_key(payload, model_key)
+    pipe, meta = _load_model_or_http(mk)
     cols = meta["num_cols"] + meta["cat_cols"]
 
     # 2) 组一行与训练一致的列；缺失留 None，由流水线里的 Imputer 处理
@@ -305,6 +363,9 @@ def explain_route(payload: ClaimInput):
         if k in row:
             row[k] = v
     X = pd.DataFrame([row])
+
+    # Apply age handling for consistency
+    _apply_age_handling(payload, X)
 
     # 3) 调用统一版解释函数（返回 top-k (name, shap_value)）
     topk = explain(pipe, X)
@@ -327,6 +388,9 @@ def override(req: OverrideRequest):
     # Disabled in this demo build to avoid undefined globals (PIPE/MODEL_VERSION).
     raise HTTPException(status_code=501, detail="Override endpoint is temporarily disabled in this demo build.")
 
+@app.get("/options")
+def options():
+    return _load_options()
 
 app.include_router(admin)
 
@@ -338,10 +402,10 @@ def ui():
     return FileResponse(UI_DIR / "index.html")
 
 @app.get("/meta")
-def meta():
+def meta(model_key: str = "underwriting"):
     try:
-        _, meta = load_model()
+        _, meta = _load_model_or_http(model_key)
         ver = str(meta.get("model_version", "untrained"))
     except Exception:
         ver = "untrained"
-    return {"model_version": ver}
+    return {"model_version": ver, "model_key": model_key}
